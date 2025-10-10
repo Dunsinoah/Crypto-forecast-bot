@@ -1,89 +1,74 @@
-# 🚀 Crypto Telegram Forecast Bot (for GitHub / VPS)
-import os
-import requests
-import numpy as np
+import yfinance as yf
 import pandas as pd
+import numpy as np
+import requests
+import os
 from datetime import datetime
-from pycoingecko import CoinGeckoAPI
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import letter
 
-# Telegram credentials (stored as environment variables)
-TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
-TG_CHAT_ID = os.getenv("TG_CHAT_ID")
+# Telegram credentials from GitHub Secrets
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Coins to track
+# List of coins to forecast
 coins = {
-    "bitcoin": "Bitcoin",
-    "ethereum": "Ethereum",
-    "dogecoin": "Dogecoin",
-    "binancecoin": "Binance Coin",
-    "solana": "Solana",
-    "ripple": "XRP",
-    "pepe": "Pepe",
-    "sui": "Sui"
+    "BTC-USD": "Bitcoin",
+    "ETH-USD": "Ethereum",
+    "DOGE-USD": "Dogecoin",
+    "BNB-USD": "Binance Coin",
+    "SOL-USD": "Solana",
+    "XRP-USD": "XRP",
+    "PEPE-USD": "Pepe",
+    "SUI-USD": "Sui"
 }
 
-cg = CoinGeckoAPI()
-results = []
-
-for coin_id, name in coins.items():
+def get_forecast(symbol):
+    """Fetch last 90 days and forecast short-term trend."""
     try:
-        data = cg.get_coin_market_chart_by_id(id=coin_id, vs_currency='usd', days=90)['prices']
-        df = pd.DataFrame(data, columns=['timestamp', 'price'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df.set_index('timestamp', inplace=True)
+        data = yf.download(symbol, period="90d", interval="1d")["Close"]
+        if data.isnull().all():
+            raise ValueError("No valid data")
 
-        prices = df['price']
-        log_returns = np.log(prices / prices.shift(1)).dropna()
-        mu = log_returns.mean()
-        sigma = log_returns.std()
-        last_price = prices.iloc[-1]
-
-        # 2-day forecast using GBM
-        days = 2
-        forecast_price = last_price * np.exp((mu - 0.5 * sigma**2) * days + sigma * np.sqrt(days) * np.random.randn())
+        # Simple moving average + slope for trend
+        last_price = data.iloc[-1]
+        sma_7 = data.rolling(7).mean().iloc[-1]
+        slope = np.polyfit(range(len(data[-7:])), data[-7:], 1)[0]
+        forecast_price = last_price + slope * 2  # 2-day projection
         pct_change = ((forecast_price - last_price) / last_price) * 100
 
-        if pct_change > 1.0:
-            signal = "BUY ✅"
-        elif pct_change < -1.0:
-            signal = "SELL ❌"
+        # Basic buy/sell signal logic
+        if pct_change > 1:
+            signal = "BUY 🔼"
+        elif pct_change < -1:
+            signal = "SELL 🔽"
         else:
             signal = "HOLD ⚖️"
 
-        results.append([name, round(last_price, 4), round(forecast_price, 4), round(pct_change, 2), signal])
-
+        return {
+            "Price": round(last_price, 4),
+            "Forecast": round(forecast_price, 4),
+            "Change": round(pct_change, 2),
+            "Signal": signal
+        }
     except Exception as e:
-        results.append([name, "Error", "Error", "Error", str(e)[:30]])
+        return {"Price": "N/A", "Forecast": "N/A", "Change": "N/A", "Signal": "No Data"}
 
-df = pd.DataFrame(results, columns=["Coin", "Current Price (USD)", "Forecast (2d)", "% Change", "Signal"])
+def send_telegram_message(message):
+    """Send message to Telegram chat."""
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
+    requests.post(url, data=payload)
 
-# --- Generate PDF ---
-pdf_path = "crypto_forecast_report.pdf"
-c = canvas.Canvas(pdf_path, pagesize=letter)
-c.setFont("Helvetica-Bold", 14)
-c.drawString(160, 750, "Crypto 2-Day Forecast & Signals Report")
-c.setFont("Helvetica", 10)
-y = 700
-for _, row in df.iterrows():
-    text = f"{row['Coin']}: ${row['Current Price (USD)']} → ${row['Forecast (2d)']} ({row['% Change']}%) → {row['Signal']}"
-    c.drawString(50, y, text)
-    y -= 20
-c.save()
+def main():
+    report = []
+    for symbol, name in coins.items():
+        print(f"Fetching {name}...")
+        res = get_forecast(symbol)
+        report.append(f"<b>{name}</b>\nPrice: ${res['Price']}\n2d Forecast: ${res['Forecast']}\nChange: {res['Change']}%\nSignal: {res['Signal']}\n")
 
-# --- Telegram Send ---
-summary = "\n".join([f"{r[0]}: {r[4]} ({r[3]}%)" for r in results])
-message = f"📊 *Crypto Forecast Update*\n\n{summary}\n\n🕒 {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}"
-telegram_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    message = f"📊 <b>Daily Crypto Forecast - {today}</b>\n\n" + "\n".join(report)
+    send_telegram_message(message)
+    print("✅ Telegram update sent.")
 
-requests.post(telegram_url, json={"chat_id": TG_CHAT_ID, "text": message, "parse_mode": "Markdown"})
-
-# Send the PDF too
-files = {'document': open(pdf_path, 'rb')}
-requests.post(
-    f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendDocument",
-    data={"chat_id": TG_CHAT_ID},
-    files=files
-)
-
+if __name__ == "__main__":
+    main()
