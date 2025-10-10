@@ -1,1 +1,0 @@
-# Crypto-forecast-bot
